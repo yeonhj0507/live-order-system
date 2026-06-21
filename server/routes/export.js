@@ -1,0 +1,41 @@
+const { Router } = require('express');
+const db = require('../db');
+const dm = require('../services/dmService');
+
+const router = Router();
+
+// 세션별 배송 CSV 내보내기 (제안서 EXPORT LOGIC)
+router.get('/csv/:sessionId', (req, res) => {
+  const rows = db.prepare(`
+    SELECT
+      b.delivery_recipient,
+      b.delivery_address,
+      b.delivery_phone,
+      o.order_price,
+      o.order_token,
+      c.customer_id
+    FROM delivery_bundle b
+    JOIN "order" o  ON o.bundle_id   = b.bundle_id
+    JOIN customer c ON o.customer_id = c.customer_id
+    WHERE o.session_id = ?
+    ORDER BY b.bundle_id
+  `).all(req.params.sessionId);
+
+  const BOM = '﻿';
+  let csv = BOM + 'recipient,address,phone,tracking_no,note\r\n';
+  for (const r of rows) {
+    const label = `(${r.customer_id}) -- ${r.order_token}`;
+    csv += `"${r.delivery_recipient || ''}","${r.delivery_address || ''}","${r.delivery_phone || ''}","","${label}"\r\n`;
+  }
+
+  res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+  res.setHeader('Content-Disposition', `attachment; filename="session_${req.params.sessionId}_delivery.csv"`);
+  res.send(csv);
+});
+
+// Mock DM 로그 조회
+router.get('/dm-log', (req, res) => {
+  res.json(dm.getLog());
+});
+
+module.exports = router;
