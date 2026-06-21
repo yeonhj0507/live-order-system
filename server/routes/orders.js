@@ -1,115 +1,108 @@
 const { Router } = require('express');
 const { v4: uuidv4 } = require('uuid');
-const db = require('../db');
+const pool = require('../db');
 const dm = require('../services/dmService');
 
 const router = Router();
 
-// 주문 생성 (제안서 ORDER CREATION 로직)
-router.post('/', (req, res) => {
+router.post('/', async (req, res) => {
   const { session_id, customer_id, customer_nickname, order_price } = req.body;
   if (!session_id || !customer_id || !order_price) {
     return res.status(400).json({ error: 'session_id, customer_id, order_price 필수' });
   }
 
-  const tx = db.transaction(() => {
-    // 1. customer 없으면 INSERT
-    const existing = db.prepare('SELECT customer_id FROM customer WHERE customer_id = ?').get(customer_id);
-    if (!existing) {
-      db.prepare('INSERT INTO customer (customer_id, customer_nickname) VALUES (?, ?)')
-        .run(customer_id, customer_nickname || customer_id);
+  const conn = await pool.getConnection();
+  try {
+    await conn.beginTransaction();
+
+    const [existing] = await conn.query('SELECT customer_id FROM customer WHERE customer_id = ?', [customer_id]);
+    if (existing.length === 0) {
+      await conn.query('INSERT INTO customer (customer_id, customer_nickname) VALUES (?, ?)',
+        [customer_id, customer_nickname || customer_id]);
     }
 
-    // 2. UUID order_token 생성
     const orderToken = uuidv4();
 
-    // 3. delivery_bundle SINGLE 생성
-    const bundleResult = db.prepare(
-      "INSERT INTO delivery_bundle (customer_id, bundle_status) VALUES (?, 'SINGLE')"
-    ).run(customer_id);
-    const bundleId = bundleResult.lastInsertRowid;
+    const [bundleResult] = await conn.query(
+      "INSERT INTO delivery_bundle (customer_id, bundle_status) VALUES (?, 'SINGLE')", [customer_id]
+    );
+    const bundleId = bundleResult.insertId;
 
-    // 4. order INSERT (paid_at = NULL)
-    const orderResult = db.prepare(`
-      INSERT INTO "order" (session_id, customer_id, bundle_id, order_price, order_token)
-      VALUES (?, ?, ?, ?, ?)
-    `).run(session_id, customer_id, bundleId, order_price, orderToken);
+    const [orderResult] = await conn.query(
+      'INSERT INTO `order` (session_id, customer_id, bundle_id, order_price, order_token) VALUES (?, ?, ?, ?, ?)',
+      [session_id, customer_id, bundleId, order_price, orderToken]
+    );
 
-    // 5. Mock DM 발송
+    await conn.commit();
     dm.sendPaymentLink(customer_id, orderToken);
 
-    return {
-      order_id: orderResult.lastInsertRowid,
+    res.status(201).json({
+      order_id: orderResult.insertId,
       order_token: orderToken,
       bundle_id: bundleId,
-    };
-  });
-
-  try {
-    const result = tx();
-    res.status(201).json(result);
+    });
   } catch (err) {
+    await conn.rollback();
     res.status(500).json({ error: err.message });
+  } finally {
+    conn.release();
   }
 });
 
-// 주문 상세 (토큰으로 조회 - 결제 페이지용)
-router.get('/token/:token', (req, res) => {
-  const row = db.prepare('SELECT * FROM v_order_status WHERE order_token = ?').get(req.params.token);
-  if (!row) return res.status(404).json({ error: '주문을 찾을 수 없습니다' });
-  res.json(row);
+router.get('/token/:token', async (req, res) => {
+  const [rows] = await pool.query('SELECT * FROM v_order_status WHERE order_token = ?', [req.params.token]);
+  if (!rows[0]) return res.status(404).json({ error: '주문을 찾을 수 없습니다' });
+  res.json(rows[0]);
 });
 
-// 결제 처리 (제안서 PAYMENT LOGIC)
-router.post('/:id/pay', (req, res) => {
+router.post('/:id/pay', async (req, res) => {
   const orderId = req.params.id;
+  const conn = await pool.getConnection();
+  try {
+    await conn.beginTransaction();
 
-  const tx = db.transaction(() => {
-    // 1. paid_at UPDATE
-    db.prepare('UPDATE "order" SET paid_at = datetime(\'now\', \'localtime\') WHERE order_id = ?')
-      .run(orderId);
+    await conn.query('UPDATE `order` SET paid_at = NOW() WHERE order_id = ?', [orderId]);
 
-    // 2. 해당 bundle의 미입금 건수 확인
-    const order = db.prepare('SELECT * FROM "order" WHERE order_id = ?').get(orderId);
-    if (!order) throw new Error('주문을 찾을 수 없습니다');
+    const [orderRows] = await conn.query('SELECT * FROM `order` WHERE order_id = ?', [orderId]);
+    if (!orderRows[0]) throw new Error('주문을 찾을 수 없습니다');
+    const order = orderRows[0];
 
-    const unpaid = db.prepare(
-      'SELECT COUNT(*) AS cnt FROM "order" WHERE bundle_id = ? AND paid_at IS NULL'
-    ).get(order.bundle_id);
+    const [unpaidRows] = await conn.query(
+      'SELECT COUNT(*) AS cnt FROM `order` WHERE bundle_id = ? AND paid_at IS NULL', [order.bundle_id]
+    );
 
-    // 3. 전액 입금 시 delivery_token 생성 + DM 발송
-    if (unpaid.cnt === 0) {
+    let result;
+    if (unpaidRows[0].cnt === 0) {
       const deliveryToken = uuidv4();
-      db.prepare('UPDATE delivery_bundle SET delivery_token = ? WHERE bundle_id = ?')
-        .run(deliveryToken, order.bundle_id);
+      await conn.query('UPDATE delivery_bundle SET delivery_token = ? WHERE bundle_id = ?',
+        [deliveryToken, order.bundle_id]);
       dm.sendDeliveryLink(order.customer_id, deliveryToken);
-      return { paid: true, all_paid: true, delivery_token: deliveryToken };
+      result = { paid: true, all_paid: true, delivery_token: deliveryToken };
+    } else {
+      result = { paid: true, all_paid: false, remaining: unpaidRows[0].cnt };
     }
 
-    return { paid: true, all_paid: false, remaining: unpaid.cnt };
-  });
-
-  try {
-    const result = tx();
+    await conn.commit();
     res.json(result);
   } catch (err) {
+    await conn.rollback();
     res.status(500).json({ error: err.message });
+  } finally {
+    conn.release();
   }
 });
 
-// 스크린샷 등록 (라이브 중 캡처 확인 → PENDING→UNPAID 전환)
-router.patch('/:id/screenshot', (req, res) => {
-  const orderId = req.params.id;
-  const screenshotPath = `screenshots/order_${orderId}_${Date.now()}.png`;
-  const result = db.prepare('UPDATE "order" SET order_screenshot = ? WHERE order_id = ?')
-    .run(screenshotPath, orderId);
-  if (result.changes === 0) return res.status(404).json({ error: '주문을 찾을 수 없습니다' });
+router.patch('/:id/screenshot', async (req, res) => {
+  const screenshotPath = `screenshots/order_${req.params.id}_${Date.now()}.png`;
+  const [result] = await pool.query(
+    'UPDATE `order` SET order_screenshot = ? WHERE order_id = ?', [screenshotPath, req.params.id]
+  );
+  if (result.affectedRows === 0) return res.status(404).json({ error: '주문을 찾을 수 없습니다' });
   res.json({ ok: true, order_screenshot: screenshotPath });
 });
 
-// 전체 주문 목록
-router.get('/', (req, res) => {
-  const rows = db.prepare('SELECT * FROM v_order_status ORDER BY ordered_at DESC').all();
+router.get('/', async (req, res) => {
+  const [rows] = await pool.query('SELECT * FROM v_order_status ORDER BY ordered_at DESC');
   res.json(rows);
 });
 

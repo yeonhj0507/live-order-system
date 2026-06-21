@@ -1,17 +1,10 @@
-const Database = require('better-sqlite3');
-const path = require('path');
-const fs = require('fs');
+const mysql = require('mysql2/promise');
 
-const DB_PATH = path.join(__dirname, '..', 'data', 'live_order.db');
-const DB_DIR = path.dirname(DB_PATH);
+const pool = mysql.createPool({
+  uri: process.env.DATABASE_URL,
+  waitForConnections: true,
+  connectionLimit: 5,
+  ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: true } : undefined,
+});
 
-if (!fs.existsSync(DB_DIR)) {
-  fs.mkdirSync(DB_DIR, { recursive: true });
-}
-
-const db = new Database(DB_PATH);
-
-db.pragma('journal_mode = WAL');
-db.pragma('foreign_keys = ON');
-
-module.exports = db;
+module.exports = pool;

@@ -1,6 +1,0 @@
-services:
-  - type: web
-    name: live-order-system
-    runtime: node
-    buildCommand: npm install --production=false && cd client && npm install --production=false && npx vite build
-    startCommand: node server/app.js

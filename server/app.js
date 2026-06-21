@@ -2,30 +2,11 @@ const express = require('express');
 const cors = require('cors');
 const path = require('path');
 const fs = require('fs');
-const db = require('./db');
 
 const app = express();
-const PORT = process.env.PORT || 3000;
 
 app.use(cors());
 app.use(express.json());
-
-// DB 초기화 (테이블이 없으면 자동 생성)
-const sqlDir = path.join(__dirname, '..', 'database');
-const hasTable = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='live_session'").get();
-if (!hasTable) {
-  console.log('Initializing database...');
-  db.exec(fs.readFileSync(path.join(sqlDir, 'schema.sql'), 'utf-8'));
-  db.exec(fs.readFileSync(path.join(sqlDir, 'views.sql'), 'utf-8'));
-  db.exec(fs.readFileSync(path.join(sqlDir, 'seed.sql'), 'utf-8'));
-  console.log('Database initialized with seed data.');
-} else {
-  // 뷰는 매번 재생성
-  db.exec('DROP VIEW IF EXISTS v_order_status');
-  db.exec('DROP VIEW IF EXISTS v_session_revenue');
-  db.exec('DROP VIEW IF EXISTS v_unpaid_orders');
-  db.exec(fs.readFileSync(path.join(sqlDir, 'views.sql'), 'utf-8'));
-}
 
 // API 라우트
 app.use('/api/sessions',  require('./routes/sessions'));
@@ -43,6 +24,12 @@ if (fs.existsSync(clientDist)) {
   });
 }
 
-app.listen(PORT, () => {
-  console.log(`Server running on http://localhost:${PORT}`);
-});
+// Vercel에서는 export, 로컬에서는 listen
+if (process.env.VERCEL) {
+  module.exports = app;
+} else {
+  const PORT = process.env.PORT || 3000;
+  app.listen(PORT, () => {
+    console.log(`Server running on http://localhost:${PORT}`);
+  });
+}
