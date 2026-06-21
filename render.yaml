@@ -2,8 +2,5 @@ services:
   - type: web
     name: live-order-system
     runtime: node
-    buildCommand: npm install && npm run build
-    startCommand: npm start
-    envVars:
-      - key: NODE_ENV
-        value: production
+    buildCommand: npm install --production=false && cd client && npm install --production=false && npx vite build
+    startCommand: node server/app.js
